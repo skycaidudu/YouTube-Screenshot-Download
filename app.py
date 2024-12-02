@@ -73,79 +73,66 @@ def detect_scene_change(prev_frame, curr_frame, min_threshold=0.10, max_threshol
 @app.route('/api/analyze_frames', methods=['POST'])
 def analyze_frames():
     try:
-        # 获取前端发送的帧数据
-        data = request.json
-        frames_data = data.get('frames', [])
+        data = request.get_json()
+        if not data or 'url' not in data:
+            return jsonify({'success': False, 'error': 'URL is required'}), 400
+
+        url = data['url']
+        video_id = extract_video_id(url)
         
-        if not frames_data:
-            return jsonify({'success': False, 'error': 'No frames data received'}), 400
+        if not video_id:
+            return jsonify({'success': False, 'error': 'Invalid YouTube URL'}), 400
+
+        # 使用YouTube API获取视频信息
+        try:
+            video_response = youtube.videos().list(
+                part='snippet',
+                id=video_id
+            ).execute()
+
+            if not video_response.get('items'):
+                return jsonify({'success': False, 'error': 'Video not found'}), 404
+
+            # 获取视频缩略图
+            thumbnails = video_response['items'][0]['snippet']['thumbnails']
+            maxres = thumbnails.get('maxres') or thumbnails.get('high') or thumbnails.get('medium')
             
-        frames = []
-        prev_frame = None
-        frame_count = 0
-        last_selected_frame_time = 0
-        min_frame_interval = 0.3
-        
-        for frame_data in frames_data:
-            # 解码base64图像数据
-            try:
-                img_data = base64.b64decode(frame_data['data'].split(',')[1])
-                nparr = np.frombuffer(img_data, np.uint8)
-                curr_frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                
-                if curr_frame is None:
-                    continue
-                    
-                current_time = frame_data.get('timestamp', 0)
-                
-                if prev_frame is not None:
-                    is_new_scene, change_rate = detect_scene_change(prev_frame, curr_frame)
-                    
-                    if is_new_scene and (current_time - last_selected_frame_time) >= min_frame_interval:
-                        clarity = calculate_frame_clarity(curr_frame)
-                        
-                        # 保持原始宽高比进行缩放
-                        height, width = curr_frame.shape[:2]
-                        target_width = 1280
-                        target_height = int(height * (target_width / width))
-                        resized_frame = cv2.resize(curr_frame, (target_width, target_height))
-                        
-                        # 编码为JPEG
-                        _, buffer = cv2.imencode('.jpg', resized_frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                        frame_base64 = base64.b64encode(buffer).decode('utf-8')
-                        
-                        frames.append({
-                            'data': frame_base64,
-                            'index': frame_count,
-                            'change_rate': float(change_rate),
-                            'clarity': float(clarity),
-                            'timestamp': current_time
-                        })
-                        
-                        last_selected_frame_time = current_time
-                
-                prev_frame = curr_frame.copy()
-                frame_count += 1
-                
-            except Exception as e:
-                print(f"Error processing frame: {str(e)}")
-                continue
-        
-        # 如果场景太多，只保留清晰度最高的几个
-        if len(frames) > 6:
-            frames.sort(key=lambda x: x['clarity'], reverse=True)
-            frames = frames[:6]
-            frames.sort(key=lambda x: x['timestamp'])
-        
-        if not frames:
-            return jsonify({'success': False, 'error': 'No scenes detected'}), 500
-            
-        return jsonify({
-            'success': True,
-            'frames': frames
-        })
-            
+            if not maxres:
+                return jsonify({'success': False, 'error': 'No thumbnails available'}), 404
+
+            # 下载缩略图并进行处理
+            response = requests.get(maxres['url'])
+            img_array = np.frombuffer(response.content, np.uint8)
+            frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+
+            # 调整图像大小
+            height, width = frame.shape[:2]
+            target_width = 1280
+            target_height = int(height * (target_width / width))
+            resized_frame = cv2.resize(frame, (target_width, target_height))
+
+            # 转换为base64
+            _, buffer = cv2.imencode('.jpg', resized_frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            frame_base64 = base64.b64encode(buffer).decode('utf-8')
+
+            frames = [{
+                'data': frame_base64,
+                'timestamp': 0,
+                'index': 0
+            }]
+
+            return jsonify({
+                'success': True,
+                'frames': frames
+            })
+
+        except Exception as e:
+            print(f"YouTube API error: {str(e)}")
+            return jsonify({'success': False, 'error': str(e)}), 500
+
     except Exception as e:
+        print(f"Error in analyze_frames: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
         print(f"Error in analyze_frames: {str(e)}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
