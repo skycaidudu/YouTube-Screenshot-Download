@@ -1,0 +1,4 @@
+flask==2.0.1
+yt-dlp==2023.12.30
+opencv-python-headless==4.8.0.76
+numpy==1.24.3
