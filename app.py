@@ -11,14 +11,28 @@ import zipfile
 from dotenv import load_dotenv
 import requests
 import json
-# 加载环境变量
-load_dotenv()
 
+# 确保正确设置模板和静态文件路径
 app = Flask(__name__,
     static_url_path='/static',
     static_folder='static',
     template_folder='templates'
 )
+
+# 加载环境变量
+load_dotenv()
+
+# 创建临时目录
+TEMP_DIR = Path("temp_frames")
+TEMP_DIR.mkdir(exist_ok=True)
+
+@app.route('/')
+def index():
+    try:
+        return render_template('index.html')
+    except Exception as e:
+        print(f"Error rendering template: {str(e)}")
+        return str(e), 500
 
 # YouTube API 设置
 YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY')
@@ -142,4 +156,7 @@ def download_frames():
     ...
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=10000)
+    # 确保目录结构正确
+    print("Static folder:", app.static_folder)
+    print("Template folder:", app.template_folder)
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
