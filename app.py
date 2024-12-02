@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, send_file
+from flask import Flask, render_template, request, jsonify, send_file, make_response
 from googleapiclient.discovery import build
 import datetime
 import os
@@ -26,13 +26,21 @@ load_dotenv()
 TEMP_DIR = Path("temp_frames")
 TEMP_DIR.mkdir(exist_ok=True)
 
+@app.after_request
+def add_security_headers(response):
+    """添加安全头"""
+    response.headers['Content-Security-Policy'] = "default-src 'self'; \
+        script-src 'self' 'unsafe-inline' 'unsafe-eval' https://www.youtube.com https://www.googleapis.com; \
+        frame-src 'self' https://www.youtube.com; \
+        img-src 'self' data: https://*.ytimg.com https://*.youtube.com; \
+        style-src 'self' 'unsafe-inline'; \
+        connect-src 'self' https://www.googleapis.com"
+    return response
+
 @app.route('/')
 def index():
-    try:
-        return render_template('index.html')
-    except Exception as e:
-        print(f"Error rendering template: {str(e)}")
-        return str(e), 500
+    response = make_response(render_template('index.html'))
+    return response
 
 # YouTube API 设置
 YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY')

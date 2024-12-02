@@ -3,14 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>YouTube Video Analyzer</title>
+    <title>YouTube Scene Analyzer</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
     <header>
         <div class="container">
-            <h1>YouTube Video Analyzer</h1>
-            <p>Analyze and download YouTube videos</p>
+            <h1>YouTube Scene Analyzer</h1>
+            <p>Analyze scene changes in YouTube videos</p>
         </div>
     </header>
 
@@ -18,13 +18,13 @@
         <section id="tool-section">
             <div class="input-container">
                 <input type="text" id="youtube-url" 
-                       placeholder="Enter YouTube video URL, e.g.: https://www.youtube.com/watch?v=xxxx"
+                       placeholder="Enter YouTube video URL"
                        aria-label="YouTube video URL input">
-                <button onclick="getScreenshots()" class="cta-button">Analyze Video</button>
+                <button onclick="getScreenshots()" class="cta-button">Analyze Scenes</button>
             </div>
 
             <div id="loading" style="display: none;">
-                <p>Processing video, please wait...</p>
+                <p>Analyzing scenes, please wait...</p>
                 <div class="loading-spinner"></div>
             </div>
 
@@ -32,19 +32,9 @@
                 <!-- Results will be displayed here -->
             </div>
         </section>
-
-        <section id="features">
-            <h2>Features</h2>
-            <ul>
-                <li>Video information analysis</li>
-                <li>Thumbnail preview</li>
-                <li>Video download capability</li>
-                <li>Duration and size information</li>
-                <li>View count and upload date</li>
-            </ul>
-        </section>
     </main>
 
+    <script src="https://www.youtube.com/iframe_api"></script>
     <script src="{{ url_for('static', filename='script.js') }}"></script>
 </body>
 </html> 
