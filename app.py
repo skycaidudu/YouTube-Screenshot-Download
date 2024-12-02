@@ -7,24 +7,40 @@ import numpy as np
 from pathlib import Path
 import base64
 import tempfile
-import zipfile
-from dotenv import load_dotenv
 import requests
-import json
+from dotenv import load_dotenv
+import re
 
-# 确保正确设置模板和静态文件路径
+# 加载环境变量
+load_dotenv()
+
 app = Flask(__name__,
     static_url_path='/static',
     static_folder='static',
     template_folder='templates'
 )
 
-# 加载环境变量
-load_dotenv()
+# 确保 API 密钥存在
+YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY')
+if not YOUTUBE_API_KEY:
+    raise ValueError("YouTube API Key not found in environment variables")
 
-# 创建临时目录
-TEMP_DIR = Path("temp_frames")
-TEMP_DIR.mkdir(exist_ok=True)
+# 初始化 YouTube API
+youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
+
+def extract_video_id(url):
+    """从各种 YouTube URL 格式中提取视频 ID"""
+    patterns = [
+        r'(?:v=|/v/|^)([^&\n?#]+)',  # 标准格式
+        r'(?:shorts/)([^&\n?#]+)',    # Shorts 格式
+        r'(?:youtu\.be/)([^&\n?#]+)', # 短链接格式
+        r'(?:embed/)([^&\n?#]+)'      # 嵌入格式
+    ]
+    
+    for pattern in patterns:
+        if match := re.search(pattern, url):
+            return match.group(1)
+    return None
 
 @app.after_request
 def add_security_headers(response):
@@ -42,63 +58,34 @@ def index():
     response = make_response(render_template('index.html'))
     return response
 
-# YouTube API 设置
-YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY')
-youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
-
-# 保留原有的辅助函数
-def calculate_frame_clarity(frame):
-    """计算帧的清晰度"""
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    return cv2.Laplacian(gray, cv2.CV_64F).var()
-
-def detect_scene_change(prev_frame, curr_frame, min_threshold=0.10, max_threshold=0.90):
-    """检测场景变化"""
-    # 保持原有的场景检测逻辑
-    prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
-    curr_gray = cv2.cvtColor(curr_frame, cv2.COLOR_BGR2GRAY)
-    
-    diff = cv2.absdiff(prev_gray, curr_gray)
-    change_rate = np.mean(diff) / 255.0
-    
-    blocks = 4
-    h, w = prev_gray.shape
-    block_h, block_w = h // blocks, w // blocks
-    
-    block_changes = []
-    for i in range(blocks):
-        for j in range(blocks):
-            y1, y2 = i * block_h, (i + 1) * block_h
-            x1, x2 = j * block_w, (j + 1) * block_w
-            block_diff = diff[y1:y2, x1:x2]
-            block_changes.append(np.mean(block_diff) / 255.0)
-    
-    max_block_change = max(block_changes)
-    is_new_scene = (min_threshold <= change_rate <= max_threshold) or (max_block_change > max_threshold * 0.8)
-    
-    return is_new_scene, max(change_rate, max_block_change)
-
 @app.route('/api/analyze_frames', methods=['POST'])
 def analyze_frames():
     try:
+        print("Received analyze_frames request")  # 调试日志
         data = request.get_json()
         if not data or 'url' not in data:
+            print("No URL in request data")  # 调试日志
             return jsonify({'success': False, 'error': 'URL is required'}), 400
 
         url = data['url']
-        video_id = extract_video_id(url)
+        print(f"Processing URL: {url}")  # 调试日志
         
+        video_id = extract_video_id(url)
         if not video_id:
+            print(f"Could not extract video ID from URL: {url}")  # 调试日志
             return jsonify({'success': False, 'error': 'Invalid YouTube URL'}), 400
 
-        # 使用YouTube API获取视频信息
+        print(f"Extracted video ID: {video_id}")  # 调试日志
+
         try:
+            # 使用 YouTube API 获取视频信息
             video_response = youtube.videos().list(
                 part='snippet',
                 id=video_id
             ).execute()
 
             if not video_response.get('items'):
+                print("No video found with ID:", video_id)  # 调试日志
                 return jsonify({'success': False, 'error': 'Video not found'}), 404
 
             # 获取视频缩略图
@@ -106,9 +93,11 @@ def analyze_frames():
             maxres = thumbnails.get('maxres') or thumbnails.get('high') or thumbnails.get('medium')
             
             if not maxres:
+                print("No thumbnails available for video:", video_id)  # 调试日志
                 return jsonify({'success': False, 'error': 'No thumbnails available'}), 404
 
-            # 下载缩略图并进行处理
+            # 下载缩略图
+            print(f"Downloading thumbnail from: {maxres['url']}")  # 调试日志
             response = requests.get(maxres['url'])
             img_array = np.frombuffer(response.content, np.uint8)
             frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
@@ -129,29 +118,20 @@ def analyze_frames():
                 'index': 0
             }]
 
+            print("Successfully processed video")  # 调试日志
             return jsonify({
                 'success': True,
                 'frames': frames
             })
 
         except Exception as e:
-            print(f"YouTube API error: {str(e)}")
+            print(f"YouTube API error: {str(e)}")  # 调试日志
             return jsonify({'success': False, 'error': str(e)}), 500
 
     except Exception as e:
-        print(f"Error in analyze_frames: {str(e)}")
+        print(f"Error in analyze_frames: {str(e)}")  # 调试日志
         return jsonify({'success': False, 'error': str(e)}), 500
-        print(f"Error in analyze_frames: {str(e)}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-# 保留原有的下载帧功能
-@app.route('/api/download_frames', methods=['POST'])
-def download_frames():
-    # 保持原有的下载帧逻辑不变
-    ...
 
 if __name__ == '__main__':
-    # 确保目录结构正确
-    print("Static folder:", app.static_folder)
-    print("Template folder:", app.template_folder)
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
+    debug_mode = os.getenv('FLASK_ENV') == 'development'
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 10000)), debug=debug_mode)
