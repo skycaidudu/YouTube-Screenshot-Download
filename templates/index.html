@@ -3,38 +3,47 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>YouTube Scene Analyzer</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <title>YouTube Video Analyzer</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500&display=swap" rel="stylesheet">
 </head>
 <body>
-    <header>
-        <div class="container">
-            <h1>YouTube Scene Analyzer</h1>
-            <p>Analyze scene changes in YouTube videos</p>
+    <div class="language-selector">
+        <select id="languageSelect" onchange="changeLanguage()">
+            <option value="en">English</option>
+            <option value="vi">Tiếng Việt</option>
+            <option value="ar">العربية</option>
+            <option value="ar-ma">العربية المغربية</option>
+        </select>
+    </div>
+
+    <div class="main-container">
+        <header>
+            <h1 data-i18n="title">YouTube Video Analyzer</h1>
+            <p data-i18n="subtitle">Analyze and download YouTube videos</p>
+        </header>
+
+        <div class="input-container">
+            <input type="text" id="youtube-url" data-i18n-placeholder="urlPlaceholder">
+            <button onclick="analyzeVideo()" data-i18n="analyzeButton">Analyze Video</button>
         </div>
-    </header>
 
-    <main class="container">
-        <section id="tool-section">
-            <div class="input-container">
-                <input type="text" id="youtube-url" 
-                       placeholder="Enter YouTube video URL"
-                       aria-label="YouTube video URL input">
-                <button onclick="getScreenshots()" class="cta-button">Analyze Scenes</button>
+        <div class="results-container">
+            <h2 data-i18n="resultsTitle">Scene Analysis Results</h2>
+            <div id="frames-container" class="frames-grid"></div>
+            <div id="download-buttons" class="download-buttons">
+                <button onclick="downloadSelected()" data-i18n="downloadSelected">Download Selected Scenes</button>
+                <button onclick="downloadFrames()" data-i18n="downloadAll">Download All Scenes</button>
             </div>
+        </div>
 
-            <div id="loading" style="display: none;">
-                <p>Analyzing scenes, please wait...</p>
-                <div class="loading-spinner"></div>
-            </div>
+        <div class="video-info">
+            <h2 data-i18n="videoInfo">Video Information</h2>
+            <div id="video-details"></div>
+        </div>
+    </div>
 
-            <div id="screenshots-container">
-                <!-- Results will be displayed here -->
-            </div>
-        </section>
-    </main>
-
-    <script src="https://www.youtube.com/iframe_api"></script>
-    <script src="{{ url_for('static', filename='script.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/translations.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
 </body>
 </html> 

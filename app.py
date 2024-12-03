@@ -1,5 +1,6 @@
-from flask import Flask, render_template, request, jsonify, send_file, make_response
+from flask import Flask, render_template, request, jsonify, send_file
 from googleapiclient.discovery import build
+import yt_dlp
 import datetime
 import os
 import cv2
@@ -7,9 +8,13 @@ import numpy as np
 from pathlib import Path
 import base64
 import tempfile
-import requests
+import zipfile
 from dotenv import load_dotenv
+import requests
+from io import BytesIO
+import json
 import re
+import shutil
 
 # 加载环境变量
 load_dotenv()
@@ -20,118 +25,231 @@ app = Flask(__name__,
     template_folder='templates'
 )
 
-# 确保 API 密钥存在
-YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY')
-if not YOUTUBE_API_KEY:
-    raise ValueError("YouTube API Key not found in environment variables")
+# 创建临时目录
+TEMP_DIR = Path("temp_frames")
+TEMP_DIR.mkdir(exist_ok=True)
 
-# 初始化 YouTube API
+# YouTube API 设置
+YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY')
 youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
 
-def extract_video_id(url):
-    """从各种 YouTube URL 格式中提取视频 ID"""
-    patterns = [
-        r'(?:v=|/v/|^)([^&\n?#]+)',  # 标准格式
-        r'(?:shorts/)([^&\n?#]+)',    # Shorts 格式
-        r'(?:youtu\.be/)([^&\n?#]+)', # 短链接格式
-        r'(?:embed/)([^&\n?#]+)'      # 嵌入格式
-    ]
-    
-    for pattern in patterns:
-        if match := re.search(pattern, url):
-            return match.group(1)
-    return None
+# 修改临时文件存储路径
+UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', 'uploads')
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
-@app.after_request
-def add_security_headers(response):
-    """添加安全头"""
-    response.headers['Content-Security-Policy'] = "default-src 'self'; \
-        script-src 'self' 'unsafe-inline' 'unsafe-eval' https://www.youtube.com https://www.googleapis.com; \
-        frame-src 'self' https://www.youtube.com; \
-        img-src 'self' data: https://*.ytimg.com https://*.youtube.com; \
-        style-src 'self' 'unsafe-inline'; \
-        connect-src 'self' https://www.googleapis.com"
-    return response
+# 确保目录存在
+if not os.path.exists(UPLOAD_FOLDER):
+    os.makedirs(UPLOAD_FOLDER)
 
 @app.route('/')
 def index():
-    response = make_response(render_template('index.html'))
-    return response
+    return render_template('index.html')
+
+def calculate_frame_clarity(frame):
+    """计算帧的清晰度"""
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    return cv2.Laplacian(gray, cv2.CV_64F).var()
+
+def detect_scene_change(prev_frame, curr_frame, min_threshold=0.10, max_threshold=0.90):
+    """检测场景变化"""
+    prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
+    curr_gray = cv2.cvtColor(curr_frame, cv2.COLOR_BGR2GRAY)
+    
+    diff = cv2.absdiff(prev_gray, curr_gray)
+    change_rate = np.mean(diff) / 255.0
+    
+    blocks = 4
+    h, w = prev_gray.shape
+    block_h, block_w = h // blocks, w // blocks
+    
+    block_changes = []
+    for i in range(blocks):
+        for j in range(blocks):
+            y1, y2 = i * block_h, (i + 1) * block_h
+            x1, x2 = j * block_w, (j + 1) * block_w
+            block_diff = diff[y1:y2, x1:x2]
+            block_changes.append(np.mean(block_diff) / 255.0)
+    
+    max_block_change = max(block_changes)
+    is_new_scene = (min_threshold <= change_rate <= max_threshold) or (max_block_change > max_threshold * 0.8)
+    
+    return is_new_scene, max(change_rate, max_block_change)
+
+def find_clearest_frame(cap, center_frame_no, window_size=30):
+    """在指定帧的前后范围内寻找最清晰的帧"""
+    start_frame = max(0, center_frame_no - window_size)
+    end_frame = center_frame_no + window_size
+    max_clarity = -1
+    clearest_frame = None
+    
+    current_pos = cap.get(cv2.CAP_PROP_POS_FRAMES)
+    
+    try:
+        for frame_no in range(start_frame, end_frame):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no)
+            ret, frame = cap.read()
+            if not ret:
+                break
+                
+            clarity = calculate_frame_clarity(frame)
+            if clarity > max_clarity:
+                max_clarity = clarity
+                clearest_frame = frame.copy()
+    finally:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
+    
+    return clearest_frame, max_clarity
 
 @app.route('/api/analyze_frames', methods=['POST'])
 def analyze_frames():
     try:
-        print("Received analyze_frames request")  # 调试日志
-        data = request.get_json()
-        if not data or 'url' not in data:
-            print("No URL in request data")  # 调试日志
+        url = request.json.get('url')
+        if not url:
             return jsonify({'success': False, 'error': 'URL is required'}), 400
-
-        url = data['url']
-        print(f"Processing URL: {url}")  # 调试日志
-        
-        video_id = extract_video_id(url)
-        if not video_id:
-            print(f"Could not extract video ID from URL: {url}")  # 调试日志
-            return jsonify({'success': False, 'error': 'Invalid YouTube URL'}), 400
-
-        print(f"Extracted video ID: {video_id}")  # 调试日志
-
-        try:
-            # 使用 YouTube API 获取视频信息
-            video_response = youtube.videos().list(
-                part='snippet',
-                id=video_id
-            ).execute()
-
-            if not video_response.get('items'):
-                print("No video found with ID:", video_id)  # 调试日志
-                return jsonify({'success': False, 'error': 'Video not found'}), 404
-
-            # 获取视频缩略图
-            thumbnails = video_response['items'][0]['snippet']['thumbnails']
-            maxres = thumbnails.get('maxres') or thumbnails.get('high') or thumbnails.get('medium')
             
-            if not maxres:
-                print("No thumbnails available for video:", video_id)  # 调试日志
-                return jsonify({'success': False, 'error': 'No thumbnails available'}), 404
-
-            # 下载缩略图
-            print(f"Downloading thumbnail from: {maxres['url']}")  # 调试日志
-            response = requests.get(maxres['url'])
-            img_array = np.frombuffer(response.content, np.uint8)
-            frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-
-            # 调整图像大小
-            height, width = frame.shape[:2]
-            target_width = 1280
-            target_height = int(height * (target_width / width))
-            resized_frame = cv2.resize(frame, (target_width, target_height))
-
-            # 转换为base64
-            _, buffer = cv2.imencode('.jpg', resized_frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
-            frame_base64 = base64.b64encode(buffer).decode('utf-8')
-
-            frames = [{
-                'data': frame_base64,
-                'timestamp': 0,
-                'index': 0
-            }]
-
-            print("Successfully processed video")  # 调试日志
-            return jsonify({
-                'success': True,
-                'frames': frames
-            })
-
+        # 创建临时文件夹
+        temp_dir = tempfile.mkdtemp(dir=TEMP_DIR)
+        temp_video_path = os.path.join(temp_dir, 'temp_video.mp4')
+            
+        # 使用 yt-dlp 下载视频
+        ydl_opts = {
+            'format': 'best',
+            'outtmpl': temp_video_path,
+            'quiet': True,
+            'no_warnings': True,
+            'format_sort': ['res:1080', 'ext:mp4:m4a'],
+            'extractor_args': {'youtube': {'skip': ['dash', 'hls']}}
+        }
+        
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
         except Exception as e:
-            print(f"YouTube API error: {str(e)}")  # 调试日志
-            return jsonify({'success': False, 'error': str(e)}), 500
-
+            print(f"Download error: {str(e)}")
+            return jsonify({'success': False, 'error': f'Failed to download video: {str(e)}'}), 500
+            
+        if not os.path.exists(temp_video_path):
+            return jsonify({'success': False, 'error': 'Video download failed'}), 500
+            
+        # 分析视频帧
+        cap = cv2.VideoCapture(temp_video_path)
+        frames = []
+        prev_frame = None
+        frame_count = 0
+        last_selected_frame_time = 0
+        min_frame_interval = 0.3
+        
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        while True:
+            ret, curr_frame = cap.read()
+            if not ret:
+                break
+                
+            current_time = frame_count / fps
+            
+            if frame_count % 2 == 0:
+                if prev_frame is not None:
+                    is_new_scene, change_rate = detect_scene_change(prev_frame, curr_frame)
+                    
+                    if is_new_scene and (current_time - last_selected_frame_time) >= min_frame_interval:
+                        clearest_frame, clarity = find_clearest_frame(cap, frame_count)
+                        if clearest_frame is not None:
+                            height, width = clearest_frame.shape[:2]
+                            target_width = 1280
+                            target_height = int(height * (target_width / width))
+                            resized_frame = cv2.resize(clearest_frame, (target_width, target_height))
+                            
+                            _, buffer = cv2.imencode('.jpg', resized_frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                            frame_base64 = base64.b64encode(buffer).decode('utf-8')
+                            
+                            frames.append({
+                                'data': frame_base64,
+                                'index': frame_count,
+                                'change_rate': float(change_rate),
+                                'clarity': float(clarity),
+                                'timestamp': current_time
+                            })
+                            
+                            last_selected_frame_time = current_time
+                
+                prev_frame = curr_frame.copy()
+            
+            frame_count += 1
+            
+        cap.release()
+        
+        # 如果场景太多，只保留清晰度最高的几个
+        if len(frames) > 6:
+            frames.sort(key=lambda x: x['clarity'], reverse=True)
+            frames = frames[:6]
+            frames.sort(key=lambda x: x['timestamp'])
+        
+        # 清理临时文件
+        try:
+            shutil.rmtree(temp_dir)
+        except Exception as e:
+            print(f"Error cleaning up temp files: {str(e)}")
+        
+        if not frames:
+            return jsonify({'success': False, 'error': 'No scenes detected'}), 500
+            
+        return jsonify({
+            'success': True,
+            'frames': frames
+        })
+            
     except Exception as e:
-        print(f"Error in analyze_frames: {str(e)}")  # 调试日志
+        print(f"Error in analyze_frames: {str(e)}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
+@app.route('/api/download_frames', methods=['POST'])
+def download_frames():
+    try:
+        data = request.json
+        frames = data.get('frames', [])
+        
+        if not frames:
+            return jsonify({'success': False, 'error': 'No frames selected'}), 400
+
+        temp_dir = tempfile.mkdtemp(dir=TEMP_DIR)
+        zip_path = os.path.join(temp_dir, 'scenes.zip')
+        
+        with zipfile.ZipFile(zip_path, 'w') as zf:
+            for i, frame_data in enumerate(frames):
+                try:
+                    if isinstance(frame_data, str):
+                        if ',' in frame_data:
+                            img_data = base64.b64decode(frame_data.split(',')[1])
+                        else:
+                            img_data = base64.b64decode(frame_data)
+                    else:
+                        img_data = base64.b64decode(frame_data['data'])
+                    
+                    frame_path = os.path.join(temp_dir, f'scene_{i+1}.jpg')
+                    with open(frame_path, 'wb') as f:
+                        f.write(img_data)
+                    zf.write(frame_path, f'scene_{i+1}.jpg')
+                except Exception as e:
+                    print(f"Error processing frame {i}: {str(e)}")
+                    continue
+        
+        return send_file(
+            zip_path,
+            mimetype='application/zip',
+            as_attachment=True,
+            download_name='scenes.zip'
+        )
+        
+    except Exception as e:
+        print(f"Error in download_frames: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+    finally:
+        try:
+            shutil.rmtree(temp_dir)
+        except Exception as e:
+            print(f"Error cleaning up temp files: {str(e)}")
+
 if __name__ == '__main__':
-    debug_mode = os.getenv('FLASK_ENV') == 'development'
-    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 10000)), debug=debug_mode)
+    app.run(debug=False)
